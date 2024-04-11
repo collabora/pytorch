@@ -16,6 +16,7 @@ from torch.testing._internal.common_fsdp import (
     check_sharded_parity,
     DoubleLinear,
     FSDPTest,
+    test_compiled_fsdp,
 )
 from torch.testing._internal.common_utils import run_tests
 
@@ -80,6 +81,7 @@ class TestFullyShardAutograd(FSDPTest):
             check_sharded_parity(self, ref_model, model)
 
     @skip_if_lt_x_gpu(2)
+    @test_compiled_fsdp()
     def test_unused_forward_module(self):
         """
         Tests that gradients propagate when running a backward where some
@@ -122,6 +124,7 @@ class TestFullyShardAutograd(FSDPTest):
                 _optim.zero_grad(set_to_none=(iter_idx % 2))
 
     @skip_if_lt_x_gpu(2)
+    @test_compiled_fsdp()
     def test_nontensor_activations(self):
         """
         Tests that gradients propagate when running forward with nontensor
