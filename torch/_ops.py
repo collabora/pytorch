@@ -782,6 +782,7 @@ class OpOverload(OperatorBase):
 class TorchBindOpOverload(OpOverload):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        torch._higher_order_ops.effects.register_side_effect_op(self)
 
     def _fallthrough_keys(self) -> List[DispatchKey]:
         _DEFAULT_FALLTHROUGH_KEYS = [
@@ -790,6 +791,7 @@ class TorchBindOpOverload(OpOverload):
             DispatchKey.AutogradCUDA,
             DispatchKey.ADInplaceOrView,
             DispatchKey.PythonTLSSnapshot,
+            DispatchKey.PythonDispatcher,
         ]
         return [
             key
