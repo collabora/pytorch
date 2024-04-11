@@ -423,7 +423,11 @@ Tensor& set_storage_meta__symint(Tensor& result, Storage storage, c10::SymInt st
     const auto itemsize = result.dtype().itemsize();
     c10::SymInt size_bytes = at::detail::computeStorageNbytes(
         size, stride, itemsize, std::move(storage_offset));
-    storage.set_nbytes(std::move(size_bytes));
+    if (!size_bytes.has_hint() || 
+        (size_bytes.has_hint() && 
+         static_cast<size_t>(size_bytes.expect_int()) > storage.nbytes())) {
+      storage.set_nbytes(std::move(size_bytes));
+    }
   }
   return result;
 }
