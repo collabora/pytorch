@@ -423,7 +423,7 @@ class TestExport(TestCase):
                 foo, bad_example_inp, dynamic_shapes=dynamic_shapes, strict=False
             )
 
-    def test_state(self):
+    def test_state_tensors(self):
         class M(torch.nn.Module):  # simple with register buffer
             def __init__(self):
                 super().__init__()
@@ -525,6 +525,24 @@ class TestExport(TestCase):
             "The attributes self.tensors\\[0\\], self.tensors\\[1\\] were assigned during export",
         ):
             torch.export.export(M(), (torch.randn(2, 3),), strict=False)
+
+    def test_state_primitives(self):
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.x = 1
+                self.y = {"x": 2}
+
+            def forward(self, x):
+                self.x = self.x + 3
+                self.y["x"] = self.y["x"] + 4
+                return x + self.x + self.y["x"]
+
+        ep = torch.export.export(M(), (torch.randn(2, 3),), strict=False)
+        print(ep.module()(torch.zeros(2, 3)))
+        self.assertTrue(
+            torch.allclose(ep.module()(torch.zeros(2, 3)), torch.ones(2, 3) * 10)
+        )
 
     # Predispatch has different expected results
     @testing.expectedFailureSerDerPreDispatch

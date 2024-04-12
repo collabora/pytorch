@@ -1,7 +1,7 @@
 # mypy: ignore-errors
 
 import itertools
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from functools import partial, wraps
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from unittest.mock import patch
@@ -37,6 +37,7 @@ from ._aot_autograd.utils import (  # noqa: F401
     call_func_at_runtime_with_args,
     create_tree_flattened_fn,
     maybe_to_fresh_input,
+    root_module_when_exporting_non_strict,
 )
 from ._aot_autograd.logging_utils import (  # noqa: F401
     graph_being_compiled,
@@ -546,12 +547,18 @@ def create_aot_dispatcher_function(
             # Patch set_rng_state as set_rng_state with fake tensors is
             # nonsensical. This does not affect the collection of metadata.
             with patch("torch.cuda.set_rng_state", lambda *args: None):
-                fw_metadata = run_functionalized_fw_and_collect_metadata(
-                    flat_fn,
-                    keep_input_mutations=aot_config.keep_inference_input_mutations,
-                    is_train=needs_autograd,
-                    pre_dispatch=aot_config.pre_dispatch,
-                )(*fake_flat_args)
+                mod_when_exporting_non_strict = root_module_when_exporting_non_strict(flat_fn)
+                if mod_when_exporting_non_strict is not None:
+                    ctx = _detect_attribute_assignment(mod_when_exporting_non_strict)
+                else:
+                    ctx = nullcontext()
+                with ctx:
+                    fw_metadata = run_functionalized_fw_and_collect_metadata(
+                        flat_fn,
+                        keep_input_mutations=aot_config.keep_inference_input_mutations,
+                        is_train=needs_autograd,
+                        pre_dispatch=aot_config.pre_dispatch,
+                    )(*fake_flat_args)
 
                 req_subclass_dispatch = requires_subclass_dispatch(fake_flat_args, fw_metadata)
 
@@ -1252,6 +1259,80 @@ def _aot_export_function(
         aot_config,
     )
     return fx_g, meta, in_spec, out_spec.spec
+
+
+@contextmanager
+def _detect_attribute_assignment(mod: torch.nn.Module):
+    # Do not allow assignment of tensor attributes during export unless
+    # the attribute is registered as a buffer.
+
+    STD_ATTRS = {
+        "_backward_hooks",
+        "_backward_pre_hooks",
+        "_buffers",
+        "_forward_hooks",
+        "_forward_hooks_always_called",
+        "_forward_hooks_with_kwargs",
+        "_forward_pre_hooks",
+        "_forward_pre_hooks_with_kwargs",
+        "_is_full_backward_hook",
+        "_load_state_dict_post_hooks",
+        "_load_state_dict_pre_hooks",
+        "_modules",
+        "_non_persistent_buffers_set",
+        "_parameters",
+        "_state_dict_hooks",
+        "_state_dict_pre_hooks",
+        "training",
+    }
+
+    def _get_attributes(mod):
+        # return any attributes of a module that are not standard attributes
+        return {k: v for k, v in mod.__dict__.items() if k not in STD_ATTRS}
+
+    def _set(obj, kp, v):
+        *kp, k = kp
+        obj = pytree.key_get(obj, kp)
+        if isinstance(k, pytree.GetAttrKey):
+            setattr(obj, k.name, v)
+        elif isinstance(k, pytree.MappingKey):
+            obj[k.key] = v
+        elif isinstance(k, pytree.SequenceKey):
+            obj[k.idx] = v
+
+    # save state of attributes before enter
+    snapshot = pytree.tree_map(lambda x: x, _get_attributes(mod))
+    try:
+        yield
+    finally:
+        # after exit, compare state of attributes with snapshot
+        # to detect which attributes were assigned
+        assigned_tensor_attributes = []
+
+        def _collect_assigned_attributes(kp, v, _v):
+            if _v is not v:
+                attr, *rest = kp
+                if isinstance(v, torch.Tensor):
+                    assigned_tensor_attributes.append(
+                        f"self.{attr.key}{pytree.keystr(rest)}"
+                    )
+                elif isinstance(v, (int, float, str, bool)):
+                    _set(mod, (pytree.GetAttrKey(attr.key), *rest), v)
+
+        pytree.tree_map_with_path(
+            _collect_assigned_attributes, snapshot, _get_attributes(mod)
+        )
+
+        if assigned_tensor_attributes:
+            if len(assigned_tensor_attributes) > 1:
+                msg = f"attributes {', '.join(assigned_tensor_attributes)} were"
+            else:
+                msg = f"attribute {assigned_tensor_attributes[0]} was"
+            raise ValueError(
+                f"The {msg} assigned during export. "
+                "Such attributes must be registered as buffers using the `register_buffer` API "
+                "(https://pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module.register_buffer)."
+            )
 
 
 compiled_function = aot_function
